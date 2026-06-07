@@ -54,43 +54,7 @@ const MESSAGES = {
  */
 function doPost(e) {
   var data = JSON.parse(e.postData.contents);
-  var chatId = data.message.chat.id;
-  
-  var text = data.message.text;
-  var response = "Hello World!";
-
-
-  if (text === "/start") {
-      response = MESSAGES.welcome;
-  } 
-  else if (text === "/budgets") {
-    response = getBudgetList();
-  }
-  else if (text === "/help") {
-    response = MESSAGES.help;       
-  }
-  else if (text.startsWith("/create ")) {
-    const parts = text.substring(8).trim().split(" ");
-    
-    if (parts.length < 2) {
-      response = MESSAGES.addBudgetInvalidFormat;
-    } else {
-      const name = parts[0];
-      const amount = parseFloat(parts[1]);
-      
-      if (isNaN(amount)) {
-        response = MESSAGES.addInvalidAmount;
-      } else {
-        addBudgetEntry(name, amount);
-        response = MESSAGES.addBudgetSuccess.replace("{name}", name).replace("{amount}", amount);
-      }
-    }
-  }
-  else {
-    response = MESSAGES.unknownCommand;
-  }
-  
-  sendMessage(chatId, response);
+  return handleTelegramMessage(data);
 }
 
 
@@ -105,6 +69,23 @@ function handleTelegramMessage(update) {
   let responseText = "";
   
   try {
+    // If there's a pending /log flow waiting for transaction details, handle it
+    if (processPendingLogFlow(chatId, messageText)) {
+      return;
+    }
+
+    // If user selected a budget name (reply keyboard), start waiting for transaction details
+    const possibleBudgets = getBudgetNames();
+    const incoming = (messageText || '').trim();
+    const lower = incoming.toLowerCase();
+    const matchIndex = possibleBudgets.map(function(b){return b.toLowerCase();}).indexOf(lower);
+    if (matchIndex !== -1) {
+      const selected = possibleBudgets[matchIndex];
+      const cache = CacheService.getScriptCache();
+      cache.put('awaiting_transaction_' + chatId, selected, 300); // 5 minutes
+      sendTelegramMessage(chatId, "Send transaction as: <name> <amount> (e.g. Coffee 3.5)");
+      return;
+    }
     // Parse user input
     if (messageText === "/start") {
       responseText = MESSAGES.welcome;
@@ -121,8 +102,8 @@ function handleTelegramMessage(update) {
       if (parts.length < 2) {
         responseText = MESSAGES.addBudgetInvalidFormat;
       } else {
-        const name = parts[0];
-        const amount = parseFloat(parts[1]);
+        const amount = parseFloat(parts.pop());
+        const name = parts.join(" ");
         
         if (isNaN(amount)) {
           responseText = MESSAGES.addInvalidAmount;
@@ -132,6 +113,25 @@ function handleTelegramMessage(update) {
         }
       }
     }
+    else if (messageText.startsWith("/log")) {
+      // Start /log flow: present budget names as reply keyboard
+      const budgets = getBudgetNames();
+      if (budgets.length === 0) {
+        responseText = "📋 No budgets available. Create one with: /create <name> <amount>";
+      } else {
+        // build keyboard (one button per row)
+        const keyboard = budgets.map(function(b) { return [b]; });
+        const replyMarkup = {
+          keyboard: keyboard,
+          one_time_keyboard: true,
+          resize_keyboard: true
+        };
+        responseText = "Select a budget:";
+        sendTelegramMessage(chatId, responseText, replyMarkup);
+
+        return;
+      }
+    }
     else {
       responseText = MESSAGES.unknownCommand;
     }
@@ -139,9 +139,7 @@ function handleTelegramMessage(update) {
     // Send response back to Telegram
     sendTelegramMessage(chatId, responseText);
     
-    return ContentService.createTextOutput(JSON.stringify({ ok: true }))
-                         .setMimeType(ContentService.MimeType.JSON);
-
+   
   } catch (error) {
     Logger.log("Error in handling message: " + error);
     
@@ -150,12 +148,80 @@ function handleTelegramMessage(update) {
       sendTelegramMessage(chatId, "❌ Error: " + error.toString());
     } catch (sendError) {
       Logger.log("Failed to send error message to user: " + sendError);
-    }
-    
-    // FIX: Tell Telegram "OK" so it stops retrying this broken update
-    return ContentService.createTextOutput(JSON.stringify({ ok: true, internal_error: true }))
-                         .setMimeType(ContentService.MimeType.JSON);
+    }            
   }
+}
+
+/**
+ * Helper: get budget names (first column, skip header)
+ */
+function getBudgetNames() {
+  const sheet = SpreadsheetApp.openById(CONFIG.SHEET_ID).getSheetByName(CONFIG.SHEET_BUDGET);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+  const range = sheet.getRange(2, 1, lastRow - 1, 1);
+  const values = range.getValues();
+  return values.map(function(r) { return String(r[0]).trim(); }).filter(function(v) { return v.length > 0; });
+}
+
+/**
+ * Add a transaction row: Date, Budget name, name, amount
+ */
+function addTransactionRow(budgetName, entryName, amount) {
+  const sheet = SpreadsheetApp.openById(CONFIG.SHEET_ID).getSheetByName(CONFIG.SHEET_TRANSACTION);
+  sheet.appendRow([new Date(), budgetName, entryName, amount]);
+}
+
+/**
+ * Send message to Telegram with optional reply_markup
+ */
+function sendTelegramMessage(chatId, text, replyMarkup) {
+  var url = "https://api.telegram.org/bot" + CONFIG.BOT_TOKEN + "/sendMessage";
+  var payloadObj = {
+    chat_id: chatId,
+    text: text
+  };
+  if (replyMarkup) {
+    payloadObj.reply_markup = replyMarkup;
+  }
+
+  var options = {
+    method: "post",
+    contentType: "application/json",
+    payload: JSON.stringify(payloadObj),
+    muteHttpExceptions: true
+  };
+  UrlFetchApp.fetch(url, options);
+}
+
+/**
+ * Middleware: process non-command text for ongoing /log flow
+ * This runs before normal command parsing if applicable
+ */
+function processPendingLogFlow(chatId, messageText) {
+  const cache = CacheService.getScriptCache();
+  const key = 'awaiting_transaction_' + chatId;
+  const pending = cache.get(key);
+  if (!pending) return false;
+
+  // Expecting "<name> <amount>". Last token is amount.
+  const parts = messageText.trim().split(/\s+/);
+  if (parts.length < 2) {
+    sendTelegramMessage(chatId, "❌ Invalid format. Send: <name> <amount> (e.g. Coffee 3.5)");
+    return true;
+  }
+
+  const amount = parseFloat(parts.pop());
+  const entryName = parts.join(' ');
+  if (isNaN(amount)) {
+    sendTelegramMessage(chatId, "❌ Amount must be a number. Send: <name> <amount>");
+    return true;
+  }
+
+  addTransactionRow(pending, entryName, amount);
+  cache.remove(key);
+  sendTelegramMessage(chatId, `✅ Logged ${entryName} $${amount} to ${pending}`);
+  return true;
 }
 
 /**
