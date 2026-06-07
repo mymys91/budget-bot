@@ -4,34 +4,95 @@
  */
 
 // Configuration
-const SHEET_NAME = "Budget"; // Change if your sheet has a different name
+const CONFIG = {
+  BOT_TOKEN: PropertiesService.getScriptProperties().getProperty('TELEGRAM_BOT_TOKEN'),
+  DEPLOYMENT_URL: PropertiesService.getScriptProperties().getProperty('DEPLOYMENT_URL'),
+  ALLOWED_CHAT_ID: PropertiesService.getScriptProperties().getProperty('ALLOWED_CHAT_ID'),
+  SHEET_ID: PropertiesService.getScriptProperties().getProperty('SHEET_ID'),
+  SHEET_BUDGET: "Budgets",
+  SHEET_TRANSACTION: "Transactions",
+  TIME_ZONE: Session.getScriptTimeZone(),
+};
+
+
+// Message templates (customize these)
+const MESSAGES = {
+  welcome: "👋 Welcome to Budget Bot!\n\n" +
+    "Commands:\n" +
+    "/start - Show this message\n" +
+    "/create <name> <amount> - Create budget entry\n" +
+    "/budgets - Show all budget entries\n" +
+    "/log <budget> <name> <amount> - Add transaction to budget\n" +
+    "/help - Show help\n\n" +
+    "Example: /create Grocery 50",
+    
+  help: "📖 Budget Bot Help\n\n" +
+    "To create a budget entry:\n" +
+    "/create <name> <amount>\n\n" +
+    "Example:\n" +
+    "/create Groceries 50\n" +
+    "/create Electricity 100\n\n" +
+    "To view budget entries:\n" +
+    "/budgets",
+    
+  addBudgetSuccess: "✅ Created: {name} - ${amount}",
+  addBudgetInvalidFormat: "❌ Invalid format!\n\nUse: /create <name> <amount>\nExample: /create Grocery 50",
+  addInvalidAmount: "❌ Amount must be a number!",
+  
+  listEmpty: "📋 No budget entries yet.\n\nCreate one with: /create <name> <amount>",
+  listHeader: "📋 Budget Entries:\n\n",
+  listTotal: "\n💰 Total: ${total}",
+  
+  unknownCommand: "❓ Unknown command.\n\nType /help for available commands.",
+  error: "❌ Error: {error}"
+};
+
 
 /**
  * Main function to handle POST requests from Telegram
  * This is the webhook endpoint
  */
 function doPost(e) {
-  try {
-    const contents = JSON.parse(e.postData.contents);
-    
-    // Handle Telegram webhook
-    if (contents.message) {
-      return handleTelegramMessage(contents);
-    }
-    
-    return ContentService.createTextOutput(JSON.stringify({
-      ok: false,
-      error: "Invalid request"
-    })).setMimeType(ContentService.MimeType.JSON);
-    
-  } catch (error) {
-    Logger.log("Error in doPost: " + error);
-    return ContentService.createTextOutput(JSON.stringify({
-      ok: false,
-      error: error.toString()
-    })).setMimeType(ContentService.MimeType.JSON);
+  var data = JSON.parse(e.postData.contents);
+  var chatId = data.message.chat.id;
+  
+  var text = data.message.text;
+  var response = "Hello World!";
+
+
+  if (text === "/start") {
+      response = MESSAGES.welcome;
+  } 
+  else if (text === "/budgets") {
+    response = getBudgetList();
   }
+  else if (text === "/help") {
+    response = MESSAGES.help;       
+  }
+  else if (text.startsWith("/create ")) {
+    const parts = text.substring(8).trim().split(" ");
+    
+    if (parts.length < 2) {
+      response = MESSAGES.addBudgetInvalidFormat;
+    } else {
+      const name = parts[0];
+      const amount = parseFloat(parts[1]);
+      
+      if (isNaN(amount)) {
+        response = MESSAGES.addInvalidAmount;
+      } else {
+        addBudgetEntry(name, amount);
+        response = MESSAGES.addBudgetSuccess.replace("{name}", name).replace("{amount}", amount);
+      }
+    }
+  }
+  else {
+    response = MESSAGES.unknownCommand;
+  }
+  
+  sendMessage(chatId, response);
 }
+
 
 /**
  * Handle incoming Telegram messages
@@ -46,68 +107,62 @@ function handleTelegramMessage(update) {
   try {
     // Parse user input
     if (messageText === "/start") {
-      responseText = "👋 Welcome to Budget Bot!\n\n" +
-        "Commands:\n" +
-        "/start - Show this message\n" +
-        "/add <name> <amount> - Add budget entry\n" +
-        "/list - Show all entries\n" +
-        "/help - Show help\n\n" +
-        "Example: /add Grocery 50";
+      responseText = MESSAGES.welcome;
     } 
-    else if (messageText === "/list") {
+    else if (messageText === "/budgets") {
       responseText = getBudgetList();
     }
     else if (messageText === "/help") {
-      responseText = "📖 Budget Bot Help\n\n" +
-        "To add a budget entry:\n" +
-        "/add <name> <amount>\n\n" +
-        "Example:\n" +
-        "/add Groceries 50\n" +
-        "/add Electricity 100\n\n" +
-        "To view all entries:\n" +
-        "/list";
+      responseText = MESSAGES.help;       
     }
-    else if (messageText.startsWith("/add ")) {
-      const parts = messageText.substring(5).trim().split(" ");
+    else if (messageText.startsWith("/create ")) {
+      const parts = messageText.substring(8).trim().split(" ");
       
       if (parts.length < 2) {
-        responseText = "❌ Invalid format!\n\n" +
-          "Use: /add <name> <amount>\n" +
-          "Example: /add Grocery 50";
+        responseText = MESSAGES.addBudgetInvalidFormat;
       } else {
         const name = parts[0];
         const amount = parseFloat(parts[1]);
         
         if (isNaN(amount)) {
-          responseText = "❌ Amount must be a number!";
+          responseText = MESSAGES.addInvalidAmount;
         } else {
           addBudgetEntry(name, amount);
-          responseText = `✅ Added: ${name} - $${amount}`;
+          responseText = MESSAGES.addBudgetSuccess.replace("{name}", name).replace("{amount}", amount);
         }
       }
     }
     else {
-      responseText = "❓ Unknown command.\n\nType /help for available commands.";
+      responseText = MESSAGES.unknownCommand;
     }
     
     // Send response back to Telegram
     sendTelegramMessage(chatId, responseText);
     
-    return ContentService.createTextOutput("ok");
-    
+    return ContentService.createTextOutput(JSON.stringify({ ok: true }))
+                         .setMimeType(ContentService.MimeType.JSON);
+
   } catch (error) {
-    Logger.log("Error: " + error);
-    sendTelegramMessage(chatId, "❌ Error: " + error.toString());
-    return ContentService.createTextOutput("error");
+    Logger.log("Error in handling message: " + error);
+    
+    // Try to alert the user, but wrap it so a failed alert doesn't break the return
+    try {
+      sendTelegramMessage(chatId, "❌ Error: " + error.toString());
+    } catch (sendError) {
+      Logger.log("Failed to send error message to user: " + sendError);
+    }
+    
+    // FIX: Tell Telegram "OK" so it stops retrying this broken update
+    return ContentService.createTextOutput(JSON.stringify({ ok: true, internal_error: true }))
+                         .setMimeType(ContentService.MimeType.JSON);
   }
 }
 
 /**
  * Add entry to Google Sheet
  */
-function addBudgetEntry(name, amount) {
-  const sheetId = PropertiesService.getScriptProperties().getProperty("SHEET_ID");
-  const sheet = SpreadsheetApp.openById(sheetId).getSheetByName(SHEET_NAME);
+function addBudgetEntry(name, amount) {  
+  const sheet = SpreadsheetApp.openById(CONFIG.SHEET_ID).getSheetByName(CONFIG.SHEET_BUDGET);
   
   // Add new row with data
   sheet.appendRow([name, amount]);
@@ -119,16 +174,14 @@ function addBudgetEntry(name, amount) {
  * Get all budget entries formatted for Telegram
  */
 function getBudgetList() {
-  const sheetId = PropertiesService.getScriptProperties().getProperty("SHEET_ID");
-  const sheet = SpreadsheetApp.openById(sheetId).getSheetByName(SHEET_NAME);
+  const sheet = SpreadsheetApp.openById(CONFIG.SHEET_ID).getSheetByName(CONFIG.SHEET_BUDGET);
   const data = sheet.getDataRange().getValues();
   
   if (data.length <= 1) {
-    return "📋 No entries yet.\n\nAdd one with: /add <name> <amount>";
+    return "📋 No entries yet.";
   }
   
   let message = "📋 Budget Entries:\n\n";
-  let total = 0;
   
   // Skip header row (row 0)
   for (let i = 1; i < data.length; i++) {
@@ -136,48 +189,29 @@ function getBudgetList() {
     const amount = data[i][1];
     if (name && amount) {
       message += `• ${name}: $${amount}\n`;
-      total += parseFloat(amount);
     }
   }
-  
-  message += `\n💰 Total: $${total}`;
+ 
   return message;
 }
 
 /**
  * Send message to Telegram
  */
-function sendTelegramMessage(chatId, text) {
-  const token = PropertiesService.getScriptProperties().getProperty("TELEGRAM_BOT_TOKEN");
-  
-  if (!token) {
-    throw new Error("TELEGRAM_BOT_TOKEN not set in Script Properties!");
-  }
-  
-  const url = `https://api.telegram.org/bot${token}/sendMessage`;
-  
-  const payload = {
-    chat_id: chatId,
-    text: text,
-    parse_mode: "HTML"
-  };
-  
-  const options = {
+
+function sendMessage(chatId, text) {
+  var url = "https://api.telegram.org/bot" + CONFIG.BOT_TOKEN + "/sendMessage";
+  var payload = {
     method: "post",
     contentType: "application/json",
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true
+    payload: JSON.stringify({
+      chat_id: chatId,
+      text: text
+    })
   };
-  
-  const response = UrlFetchApp.fetch(url, options);
-  const result = JSON.parse(response.getContentText());
-  
-  if (!result.ok) {
-    throw new Error("Failed to send Telegram message: " + response.getContentText());
-  }
-  
-  return result;
+  UrlFetchApp.fetch(url, payload);
 }
+
 
 /**
  * Deploy the script and get the deployment URL
@@ -193,8 +227,8 @@ function deployScript() {
  * Set webhook for Telegram bot
  */
 function setWebhook() {
-  const token = PropertiesService.getScriptProperties().getProperty("TELEGRAM_BOT_TOKEN");
-  const deploymentUrl = PropertiesService.getScriptProperties().getProperty("DEPLOYMENT_URL");
+  const token = CONFIG.BOT_TOKEN;
+  const deploymentUrl = CONFIG.DEPLOYMENT_URL;
   
   if (!token || !deploymentUrl) {
     throw new Error("TELEGRAM_BOT_TOKEN or DEPLOYMENT_URL not set!");
@@ -204,7 +238,7 @@ function setWebhook() {
   
   const payload = {
     url: deploymentUrl,
-    drop_pending_updates: true
+    drop_pending_updates: true    
   };
   
   const options = {
@@ -232,7 +266,7 @@ function setWebhook() {
  * Get webhook status info
  */
 function getWebhookInfo() {
-  const token = PropertiesService.getScriptProperties().getProperty("TELEGRAM_BOT_TOKEN");
+  const token = CONFIG.BOT_TOKEN;
   const url = `https://api.telegram.org/bot${token}/getWebhookInfo`;
   
   const response = UrlFetchApp.fetch(url);
@@ -246,7 +280,7 @@ function getWebhookInfo() {
  * Get bot information
  */
 function getBotInfo() {
-  const token = PropertiesService.getScriptProperties().getProperty("TELEGRAM_BOT_TOKEN");
+  const token = CONFIG.BOT_TOKEN;
   const url = `https://api.telegram.org/bot${token}/getMe`;
   
   const response = UrlFetchApp.fetch(url);
@@ -260,7 +294,7 @@ function getBotInfo() {
  * Remove webhook (if needed)
  */
 function removeWebhook() {
-  const token = PropertiesService.getScriptProperties().getProperty("TELEGRAM_BOT_TOKEN");
+  const token = CONFIG.BOT_TOKEN;
   const url = `https://api.telegram.org/bot${token}/deleteWebhook`;
   
   const response = UrlFetchApp.fetch(url);
@@ -268,26 +302,4 @@ function removeWebhook() {
   
   Logger.log("Delete response: " + JSON.stringify(result, null, 2));
   return result;
-}
-
-/**
- * Check sheet data (for debugging)
- */
-function checkSheetData() {
-  const sheetId = PropertiesService.getScriptProperties().getProperty("SHEET_ID");
-  const sheet = SpreadsheetApp.openById(sheetId).getSheetByName(SHEET_NAME);
-  
-  const data = sheet.getDataRange().getValues();
-  Logger.log("Sheet data: " + JSON.stringify(data, null, 2));
-  
-  return data;
-}
-
-/**
- * View script properties (for debugging)
- */
-function viewScriptProperties() {
-  const props = PropertiesService.getScriptProperties().getAll();
-  Logger.log("Script Properties: " + JSON.stringify(props, null, 2));
-  return props;
 }
